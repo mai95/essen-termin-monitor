@@ -4,7 +4,12 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 URL = "https://termine.essen.de/?link=4ce9"
 
-# Confirmed selectors from the Essen website
+# Service to book (text of the button on step 1)
+SERVICE_NAME = "Anmeldung"
+
+# Selectors from the Essen website
+SERVICE_BUTTON_SELECTOR = ".activity-selectable-item"
+WIZARD_NEXT_SELECTOR = "#next-button"
 NEXT_DATE_SELECTOR = "#next-date-button"
 DATE_SELECTOR = "#date-select"
 TIME_SELECTOR = "#time-select"
@@ -30,6 +35,29 @@ def notify(message):
     )
     response.raise_for_status()
     print("iPhone notification sent.")
+
+
+def dump_page(page, label):
+    """Print what the page currently shows, for debugging."""
+    print(f"\n===== DEBUG: {label} =====")
+    print("PAGE URL:", page.url)
+    print("PAGE TITLE:", page.title())
+    print("BODY TEXT:", page.inner_text("body")[:2000])
+    print("--- CONTROLS ON PAGE ---")
+    controls = page.evaluate(
+        """
+        () => Array.from(
+            document.querySelectorAll('button, input, select, a, [role=button]')
+        ).map(e => e.outerHTML.slice(0, 300))
+        """
+    )
+    for c in controls[:50]:
+        print(c)
+    print("--- END CONTROLS ---")
+    try:
+        page.screenshot(path="error.png", full_page=True)
+    except Exception:
+        pass
 
 
 def get_date(page):
@@ -61,30 +89,39 @@ def get_available_times(page):
     return times
 
 
-def wait_for_page(page):
-    """Wait until the appointment page is ready."""
+def open_date_step(page):
+    """
+    Go through the booking wizard until the date picker is shown:
+    step 1 = choose the service, then click "Weiter" until #date-select appears.
+    """
+    service = page.locator(SERVICE_BUTTON_SELECTOR, has_text=SERVICE_NAME).first
+
     try:
-        page.locator(DATE_SELECTOR).wait_for(state="visible", timeout=30000)
-        page.locator(NEXT_DATE_SELECTOR).wait_for(state="visible", timeout=30000)
-        page.locator(TIME_SELECTOR).wait_for(state="attached", timeout=30000)
+        service.wait_for(state="visible", timeout=30000)
+        print(f"Selecting service: {SERVICE_NAME}")
+        service.click()
+
+        for step in range(6):
+            page.wait_for_timeout(1500)
+
+            if page.locator(DATE_SELECTOR).is_visible():
+                break
+
+            print(f"Wizard step {step + 1}: clicking Weiter...")
+            page.locator(WIZARD_NEXT_SELECTOR).click(timeout=15000)
+
+        wait_for_page(page)
+
     except PlaywrightTimeoutError:
-        print("PAGE URL:", page.url)
-        print("PAGE TITLE:", page.title())
-        print("BODY TEXT:", page.inner_text("body")[:2000])
-        print("FRAMES:", [f.url for f in page.frames])
-        print("--- CONTROLS ON PAGE ---")
-        controls = page.evaluate(
-            """
-            () => Array.from(
-                document.querySelectorAll('button, input, select, a, [role=button]')
-            ).map(e => e.outerHTML.slice(0, 250))
-            """
-        )
-        for c in controls[:40]:
-            print(c)
-        print("--- END CONTROLS ---")
-        page.screenshot(path="error.png", full_page=True)
+        dump_page(page, "could not reach the date step")
         raise
+
+
+def wait_for_page(page):
+    """Wait until the date picker page is ready."""
+    page.locator(DATE_SELECTOR).wait_for(state="visible", timeout=30000)
+    page.locator(NEXT_DATE_SELECTOR).wait_for(state="visible", timeout=30000)
+    page.locator(TIME_SELECTOR).wait_for(state="attached", timeout=30000)
 
     # Allow the JavaScript application to finish updating.
     page.wait_for_timeout(2000)
@@ -94,7 +131,7 @@ def check_dates(page):
     print("Opening Essen appointment page...")
 
     page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-    wait_for_page(page)
+    open_date_step(page)
 
     current_date = get_date(page)
     print(f"Starting date: {current_date}")
@@ -112,7 +149,7 @@ def check_dates(page):
         print(f"\nChecking next date (attempt {attempt + 1}/20)...")
         print(f"Current date: {old_date}")
 
-        # Click the confirmed next-date button.
+        # Click the next-date button.
         page.locator(NEXT_DATE_SELECTOR).click()
 
         try:
@@ -131,9 +168,9 @@ def check_dates(page):
             )
         except PlaywrightTimeoutError:
             print("The date did not change.")
-            print("Refreshing page...")
-            page.reload(wait_until="domcontentloaded", timeout=60000)
-            wait_for_page(page)
+            print("Reloading page and going through the steps again...")
+            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            open_date_step(page)
             continue
 
         new_date = get_date(page)

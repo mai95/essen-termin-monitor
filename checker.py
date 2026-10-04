@@ -43,15 +43,17 @@ def dump_page(page, label):
     print("PAGE URL:", page.url)
     print("PAGE TITLE:", page.title())
     print("BODY TEXT:", page.inner_text("body")[:2000])
-    print("--- CONTROLS ON PAGE ---")
+    print("--- CONTROLS ON PAGE (calendar day buttons hidden) ---")
     controls = page.evaluate(
         """
         () => Array.from(
-            document.querySelectorAll('button, input, select, a, [role=button]')
+            document.querySelectorAll(
+                'button:not(.duet-date__day), input, select, a, [role=button]'
+            )
         ).map(e => e.outerHTML.slice(0, 300))
         """
     )
-    for c in controls[:50]:
+    for c in controls[:60]:
         print(c)
     print("--- END CONTROLS ---")
     try:
@@ -61,17 +63,12 @@ def dump_page(page, label):
 
 
 def get_date(page):
-    """Read the current date from #date-select."""
-    return page.locator(DATE_SELECTOR).input_value()
+    """Read the current date from #date-select (empty if none available)."""
+    return page.locator(DATE_SELECTOR).input_value().strip()
 
 
 def get_available_times(page):
-    """
-    Check #time-select.
-
-    The website disables this select when no appointment
-    time is available.
-    """
+    """Read the times from #time-select (empty list if disabled/empty)."""
     time_select = page.locator(TIME_SELECTOR)
 
     if time_select.is_disabled():
@@ -89,34 +86,6 @@ def get_available_times(page):
     return times
 
 
-def open_date_step(page):
-    """
-    Go through the booking wizard until the date picker is shown:
-    step 1 = choose the service, then click "Weiter" until #date-select appears.
-    """
-    service = page.locator(SERVICE_BUTTON_SELECTOR, has_text=SERVICE_NAME).first
-
-    try:
-        service.wait_for(state="visible", timeout=30000)
-        print(f"Selecting service: {SERVICE_NAME}")
-        service.click()
-
-        for step in range(6):
-            page.wait_for_timeout(1500)
-
-            if page.locator(DATE_SELECTOR).is_visible():
-                break
-
-            print(f"Wizard step {step + 1}: clicking Weiter...")
-            page.locator(WIZARD_NEXT_SELECTOR).click(timeout=15000)
-
-        wait_for_page(page)
-
-    except PlaywrightTimeoutError:
-        dump_page(page, "could not reach the date step")
-        raise
-
-
 def wait_for_page(page):
     """Wait until the date picker page is ready."""
     page.locator(DATE_SELECTOR).wait_for(state="visible", timeout=30000)
@@ -127,72 +96,91 @@ def wait_for_page(page):
     page.wait_for_timeout(2000)
 
 
+def open_date_step(page):
+    """
+    Get to the date picker (wizard step 3).
+
+    The site may start at step 1 (choose the service) or resume directly at
+    the date step, so wait for whichever appears first.
+    """
+    try:
+        page.locator(f"{SERVICE_BUTTON_SELECTOR}, {DATE_SELECTOR}").first.wait_for(
+            state="visible", timeout=30000
+        )
+
+        if page.locator(DATE_SELECTOR).is_visible():
+            print("Already on the date step.")
+        else:
+            service = page.locator(
+                SERVICE_BUTTON_SELECTOR, has_text=SERVICE_NAME
+            ).first
+            print(f"Selecting service: {SERVICE_NAME}")
+            service.click(timeout=15000)
+
+            for step in range(6):
+                page.wait_for_timeout(1500)
+
+                if page.locator(DATE_SELECTOR).is_visible():
+                    break
+
+                print(f"Wizard step {step + 1}: clicking Weiter...")
+                page.locator(WIZARD_NEXT_SELECTOR).click(timeout=15000)
+
+        wait_for_page(page)
+
+    except PlaywrightTimeoutError:
+        dump_page(page, "could not reach the date step")
+        raise
+
+
 def check_dates(page):
+    """One check: go to the date step, click the arrow, see if a date appears."""
     print("Opening Essen appointment page...")
 
     page.goto(URL, wait_until="domcontentloaded", timeout=60000)
     open_date_step(page)
 
+    # Date field already filled -> a date is available.
     current_date = get_date(page)
-    print(f"Starting date: {current_date}")
+    print(f"Date field: {current_date or '(empty - Wählen Sie ein Datum)'}")
 
-    # First check the currently displayed date.
-    times = get_available_times(page)
-    if times:
-        print("Appointment already available!")
-        return current_date, times
-
-    # Check successive available dates.
-    for attempt in range(20):
-        old_date = get_date(page)
-
-        print(f"\nChecking next date (attempt {attempt + 1}/20)...")
-        print(f"Current date: {old_date}")
-
-        # Click the next-date button.
+    if not current_date:
+        # Click the arrow next to "Wählen Sie ein Datum".
+        print("Clicking the next-date arrow...")
         page.locator(NEXT_DATE_SELECTOR).click()
 
         try:
-            # Wait until #date-select actually changes.
+            # If a date is available, the field changes from empty to that date.
             page.wait_for_function(
                 """
-                oldDate => {
+                () => {
                     const element = document.querySelector('#date-select');
-                    return element &&
-                           element.value &&
-                           element.value !== oldDate;
+                    return element && element.value && element.value.trim() !== '';
                 }
                 """,
-                arg=old_date,
-                timeout=15000,
+                timeout=10000,
             )
         except PlaywrightTimeoutError:
-            print("The date did not change.")
-            print("Reloading page and going through the steps again...")
-            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            open_date_step(page)
-            continue
+            print("The date field stayed empty -> no available date.")
+            return None, []
 
-        new_date = get_date(page)
-        print(f"New date: {new_date}")
+        current_date = get_date(page)
+        print(f"Date field now: {current_date}")
 
-        # Give the website time to populate the time selector.
-        page.wait_for_timeout(1500)
+        # Give the website a moment to fill the time selector.
+        page.wait_for_timeout(2500)
 
-        times = get_available_times(page)
-        if times:
-            print("\n" + "=" * 50)
-            print("APPOINTMENT FOUND!")
-            print("=" * 50)
-            print(f"Date : {new_date}")
-            print(f"Times: {', '.join(times)}")
-            print("=" * 50)
-            return new_date, times
+    times = get_available_times(page)
+    if not times:
+        times = ["(Uhrzeit bitte auf der Seite prüfen)"]
 
-        print("No available time on this date.")
-
-    print("\nReached maximum number of dates.")
-    return None, []
+    print("\n" + "=" * 50)
+    print("APPOINTMENT FOUND!")
+    print("=" * 50)
+    print(f"Date : {current_date}")
+    print(f"Times: {', '.join(times)}")
+    print("=" * 50)
+    return current_date, times
 
 
 def main():

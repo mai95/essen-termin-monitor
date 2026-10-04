@@ -72,6 +72,17 @@ def wait_for_page(page):
         print("PAGE TITLE:", page.title())
         print("BODY TEXT:", page.inner_text("body")[:2000])
         print("FRAMES:", [f.url for f in page.frames])
+        print("--- CONTROLS ON PAGE ---")
+        controls = page.evaluate(
+            """
+            () => Array.from(
+                document.querySelectorAll('button, input, select, a, [role=button]')
+            ).map(e => e.outerHTML.slice(0, 250))
+            """
+        )
+        for c in controls[:40]:
+            print(c)
+        print("--- END CONTROLS ---")
         page.screenshot(path="error.png", full_page=True)
         raise
 
